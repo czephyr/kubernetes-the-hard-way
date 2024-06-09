@@ -1,0 +1,20 @@
+\$ORIGIN .
+\$TTL 300	; 5 minutes
+{{ domain }} IN SOA dns.{{ domain }}. admin.{{ domain }}. (
+        1          ; serial
+        28800      ; refresh (8 hours)
+        3600       ; retry (1 hour)
+        604800     ; expire (1 week)
+        86400      ; minimum (1 day)
+        )
+        NS dns.{{ domain }}.
+\$ORIGIN {{ domain }}.
+\$TTL 3600	; 1 hour
+dns          A {{ internal_ip }}
+k8sosp       A 10.240.0.200
+controller-0 A 10.240.0.10
+controller-1 A 10.240.0.11
+controller-2 A 10.240.0.12
+worker-0     A 10.240.0.20
+worker-1     A 10.240.0.21
+worker-2     A 10.240.0.22

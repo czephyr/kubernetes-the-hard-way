@@ -1,0 +1,8 @@
+sudo tee /etc/named/zones.conf << EOF
+include "/etc/named/update.key" ;
+
+zone {{ domain }} {
+  type master ;
+  file "/var/named/dynamic/zone.db" ;
+  allow-update { key update-key ; } ;
+};

@@ -1,0 +1,1 @@
+pvt_key = "~/.ssh/k8s.pem"

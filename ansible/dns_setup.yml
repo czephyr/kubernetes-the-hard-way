@@ -1,0 +1,162 @@
+- become: yes
+  hosts: all
+  name: dns-setup
+
+  vars:
+    domain: k8s.lan
+
+  tasks: 
+  - name: Install necessary packages
+    yum:
+      name:
+      - firewalld
+      - python-firewall
+      # utilities for troubleshooting DNS
+      - bind-utils
+      # BIND DNS server software
+      - bind
+      state: present
+  - name: Enable and start firewalld
+    systemd:
+      name: firewalld
+      state: started
+      enabled: yes
+
+  - name: Open DNS service in firewall
+    firewalld:
+      service: dns
+      permanent: true
+      state: enabled
+      immediate: yes
+
+  - name: Save DNS assigned by DHCP
+    ansible.builtin.shell:
+      cmd: awk '/nameserver/ { print $2 }' /etc/resolv.conf | head -n1
+    register: upstream_dns
+    ignore_errors: True
+
+  - name: Set static DNS to the saved one and disable DHCP-provided DNS for eth0 interface
+    blockinfile:
+      insertafter: EOF
+      path: /etc/sysconfig/network-scripts/ifcfg-eth0
+      block: "{{ lookup('template', 'dns/sysconfig.j2') }}"
+      marker: ""
+
+  - name: Backup original BIND configuration file
+    ansible.builtin.copy:
+      src: /etc/named.conf
+      dest: /etc/named.conf.orig
+      owner: root
+      group: root
+      mode: '0644'
+
+  # Overwrites /etc/named.conf with a new configuration that sets the server to listen on all interfaces, specifies file paths for DNS data, allows queries from any source, sets forwarding to the UPSTREAM_DNS, and includes several other configuration files.
+  - name: Set BIND conf
+    ansible.builtin.template:
+      src: dns/named/named.conf.j2
+      dest: /etc/named.conf
+  
+  # Defines a master DNS zone for k8s.lan and specifies that updates are allowed with a specific key, setting the path to the zone database file.
+  - name: Set DNS zones conf
+    ansible.builtin.template:
+      src: dns/named/named.conf.j2
+      dest: /etc/named/named.conf
+  
+  # By setting up rndc correctly, as these commands aim to do, you ensure that your DNS management commands are authenticated and authorized, protecting the DNS server from unauthorized changes and potential security breaches.
+  - name: Generate rndc key for BIND
+    command:
+      cmd: rndc-confgen -a -c /etc/named/update.key -k update-key -r /dev/urandom
+      creates: /etc/named/update.key
+    notify: restart bind
+
+  - name: Set ownership of rndc key file
+    ansible.builtin.file:
+      path: /etc/named/update.key
+      owner: root
+      group: named
+      mode: '0640'
+
+  # The URL http://169.254.169.254/latest/meta-data/local-ipv4 that you mentioned is part of a special network configuration used by most cloud providers to allow virtual machines to access metadata about themselves without requiring external connectivity.
+  - name: Get internal IP
+    ansible.builtin.shell:
+      cmd: curl -s http://169.254.169.254/latest/meta-data/local-ipv4
+    register: internal_ip
+    ignore_errors: True
+
+  - name: Write DNS IP to JSON file
+    copy:
+      content: "{\"dns_internal_ip\": \"{{ DNS_INTERNAL_IP }}\"}"
+      dest: "/tmp/dns_ip.json"
+    delegate_to: localhost
+
+  # Defines DNS records in the zone database for the k8s.lan domain, including the DNS server itself and the other hosts, the kubernetes workers and controllers
+  - name: Set DNS zones conf
+    ansible.builtin.template:
+      src: /var/named/dynamic/zone.db
+      dest: /etc/named/zones.conf
+    notify: restart bind
+
+  - name: Check named configuration
+    command: named-checkconf /etc/named.conf
+    register: checkconf
+    failed_when: checkconf.rc != 0
+    changed_when: False
+    notify: log checkconf output
+
+  - name: Check DNS zone configuration
+    command: named-checkzone {{ domain }} /var/named/dynamic/zone.db
+    register: checkzone
+    failed_when: checkzone.rc != 0
+    changed_when: False
+    notify: log checkzone output
+
+  - name: Ensure BIND DNS service is restarted
+    ansible.builtin.systemd:
+      name: named
+      state: restarted
+    listen: "restart bind"
+
+  # axfr stands for "Asynchronous Full Transfer Zone." It is a type of DNS transaction that is used to replicate DNS databases across a set of DNS servers. Essentially, it requests a full copy of the zone's records from the server.
+  # Zone transfers (AXFR) are only permitted to specific, trusted IP addresses (typically other DNS servers within the same organization).
+  - name: Check the DNS works
+    ansible.builtin.shell:
+      cmd: dig @{{ internal_ip }} {{ domain }} axfr
+      register: dig_output
+      ignore_errors: true
+
+  - name: Log dig output
+    ansible.builtin.debug:
+      msg: "{{ dig_output.stdout_lines }}"
+    when: dig_output.stdout is defined
+
+  - name: Handle dig errors
+    ansible.builtin.debug:
+      msg: "Dig command failed with error: {{ dig_output.stderr }}"
+    when: dig_output.failed
+
+  - name: Clean all YUM cache
+    ansible.builtin.yum:
+      name: '*'
+      state: absent
+      update_cache: no
+
+  - name: Update all packages to the latest version
+    ansible.builtin.yum:
+      name: '*'
+      state: latest
+    register: update_result
+
+  - name: Reboot the machine
+    ansible.builtin.reboot:
+      msg: "Rebooting after system update"
+      reboot_timeout: 600
+    when: update_result.changed
+
+  handlers:
+    - name: log checkconf output
+      debug:
+        msg: "{{ checkconf.stdout_lines }}"
+
+    - name: log checkzone output
+      debug:
+        msg: "{{ checkzone.stdout_lines }}"

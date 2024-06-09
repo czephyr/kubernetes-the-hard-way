@@ -1,0 +1,1 @@
+Following [Kubernetes the hard way on openstack](https://github.com/e-minguez/kubernetes-the-hard-way-openstack/tree/master) but trying to use Terraform and ansible.
